@@ -9,8 +9,10 @@ from PIL import Image as PILImage
 from ultralytics import YOLOWorld
 from openai import OpenAI
 from io import BytesIO
+from PIL import Image
 import base64
-
+from .vggt.models.vggt import VGGT
+from .vggt.utils.load_fn import load_and_preprocess_images
 from .base_model import (
     BaseVisionModel,
     DetectionModel,
@@ -33,6 +35,7 @@ class VisionReasonerModel(BaseVisionModel, DetectionModel, SegmentationModel, Co
     def __init__(self, 
                  reasoning_model_path="Ricky06662/VisionReasoner-7B", 
                  segmentation_model_path="facebook/sam2-hiera-large",
+                 depth_estimation_model_path="facebook/VGGT-1B",
                  task_router_model_path="Ricky06662/TaskRouter-1.5B",
                  yolo_model_path=None,
                  generation_model_path=None):
@@ -59,6 +62,9 @@ class VisionReasonerModel(BaseVisionModel, DetectionModel, SegmentationModel, Co
         
         # Initialize segmentation model
         self.segmentation_model = SAM2ImagePredictor.from_pretrained(segmentation_model_path)
+
+        # Initialize depth estimation model
+        self.depth_estimation_model = VGGT.from_pretrained(depth_estimation_model_path).to("cuda")
 
         self.task_router = TaskRouter(task_router_model_path)
         
@@ -278,6 +284,13 @@ class VisionReasonerModel(BaseVisionModel, DetectionModel, SegmentationModel, Co
             return output_texts[0], scale_factors[0]
         return output_texts, scale_factors
     
+    def route_task(self, instruction):
+        """
+        Route task based on instruction
+        """
+        task_type = self.task_router.route_task(instruction)
+        return task_type
+    
     # BaseVisionModel implementation
     def process_single_image(self, image, instruction, return_task_type=False):
         """
@@ -291,7 +304,7 @@ class VisionReasonerModel(BaseVisionModel, DetectionModel, SegmentationModel, Co
             dict: Results dictionary
         """
         # Determine task type based on instruction
-        task_type = self.task_router.route_task(instruction)
+        task_type = self.route_task(instruction)
         
         if task_type == "segmentation":
             result = self.segment_objects(image, instruction)
@@ -299,6 +312,10 @@ class VisionReasonerModel(BaseVisionModel, DetectionModel, SegmentationModel, Co
             result = self.detect_objects(image, instruction)
         elif task_type == "counting":
             result = self.count_objects(image, instruction)
+        elif task_type == "depth_estimation":
+            result = self.depth_estimation(image, instruction)
+        elif task_type == "generation":
+            result = self.generate_image(image, instruction)
         else:  # Default to VQA
             result = self.answer_question(image, instruction)
         
@@ -786,3 +803,113 @@ class VisionReasonerModel(BaseVisionModel, DetectionModel, SegmentationModel, Co
         except Exception as e:
             print(f"Error in image generation: {e}")
             return None
+        
+    def depth_estimation(self, image, query):
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        images = load_and_preprocess_images([image], mode="pad").to(device)
+        print(images[0].shape)
+
+        pil_image = images[0].cpu().numpy()
+        pil_image = np.transpose(pil_image, (1, 2, 0))  # 从 (C,H,W) 转换为 (H,W,C)
+        pil_image = ((pil_image - pil_image.min()) / (pil_image.max() - pil_image.min()) * 255).astype(np.uint8)
+        pil_image = PILImage.fromarray(pil_image)
+
+        print(pil_image.size)
+        output_text, (x_factor, y_factor) = self._generate_model_output(
+            pil_image,
+            query,
+            self.DETECTION_TEMPLATE
+        )
+        bboxes, points, thinking, pred_answer = self.extract_bbox_points_think(
+            output_text, 
+            x_factor, 
+            y_factor
+        )
+        
+    
+        # bfloat16 is supported on Ampere GPUs (Compute Capability 8.0+) 
+        dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+
+        # Load and preprocess example images
+        with torch.no_grad():
+            with torch.cuda.amp.autocast(dtype=dtype):
+                images = images[None]  # add batch dimension
+                aggregated_tokens_list, ps_idx = self.depth_estimation_model.aggregator(images)
+
+            # Predict Depth Maps
+            depth_map, _ = self.depth_estimation_model.depth_head(aggregated_tokens_list, images, ps_idx)
+            
+            # Convert depth map to numpy array and normalize to 0-255 range
+            depth_map = depth_map.squeeze().cpu().numpy()
+            depth_map = ((depth_map - depth_map.min()) / (depth_map.max() - depth_map.min()) * 255).astype(np.uint8)
+            
+            # 获取原始图像尺寸
+            original_image = image
+            orig_w, orig_h = original_image.size
+            
+            # 将深度图转换为PIL图像以便调整大小
+            depth_map_pil = PILImage.fromarray(depth_map)
+            
+            # 计算填充区域和缩放比例
+            target_size = max(orig_w, orig_h)
+            pad_w = (target_size - orig_w) // 2
+            pad_h = (target_size - orig_h) // 2
+            
+            # 调整深度图大小并裁剪填充区域
+            depth_map_resized = depth_map_pil.resize((target_size, target_size), PILImage.BILINEAR)
+            depth_map_cropped = depth_map_resized.crop((
+                pad_w,                    # left
+                pad_h,                    # top
+                target_size - pad_w,      # right
+                target_size - pad_h       # bottom
+            ))
+            
+            # 转回numpy数组
+            depth_map = np.array(depth_map_cropped)
+            
+            # 对bboxes进行相同的坐标转换
+            # 1. 从正方形图像坐标转换到target_size坐标
+            square_size = pil_image.size[0]  # 正方形图像的尺寸
+            scale_factor = target_size / square_size
+            
+            # 2. 应用缩放和裁剪变换
+            transformed_bboxes = []
+            for bbox in bboxes:
+                x1, y1, x2, y2 = bbox
+                # 缩放到target_size
+                x1 = int(x1 * scale_factor)
+                y1 = int(y1 * scale_factor)
+                x2 = int(x2 * scale_factor)
+                y2 = int(y2 * scale_factor)
+                
+                # 减去padding偏移
+                x1 = max(0, x1 - pad_w)
+                y1 = max(0, y1 - pad_h)
+                x2 = min(orig_w, x2 - pad_w)
+                y2 = min(orig_h, y2 - pad_h)
+                
+                transformed_bboxes.append([x1, y1, x2, y2])
+            
+            # Create RGB depth map
+            depth_map_rgb = np.stack([depth_map] * 3, axis=-1)
+            
+            # Convert original image to numpy array
+            original_image = np.array(image)
+            
+            # Create combined images with two types of masks
+            # 1. Using transformed bounding box mask
+            bbox_mask = np.zeros_like(original_image, dtype=bool)
+            for bbox in transformed_bboxes:
+                x1, y1, x2, y2 = bbox
+                if x2 > x1 and y2 > y1:  # 确保bbox有效
+                    bbox_mask[y1:y2, x1:x2] = True
+            
+            bbox_combined = np.where(bbox_mask, depth_map_rgb, original_image)
+            bbox_result = Image.fromarray(bbox_combined)
+            
+            return {
+                'bbox_result': bbox_result,  # Result using transformed bounding box mask
+                'depth_map': Image.fromarray(depth_map),      # Original depth map
+                'bboxes': transformed_bboxes,  # Transformed bounding boxes
+            }
+        

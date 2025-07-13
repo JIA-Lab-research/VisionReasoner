@@ -187,3 +187,4 @@ yolov8l-world.pt
 yolov8x-worldv2.pt
 result_visualization_fail.png
 crowd_people.png
+*.png

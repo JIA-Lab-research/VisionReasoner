@@ -13,7 +13,7 @@ def main():
     parser.add_argument("--segmentation_model_path", type=str, default="facebook/sam2-hiera-large")
     parser.add_argument("--image_path", type=str, default="assets/airplanes.png", help="Path to the input image")
     parser.add_argument("--query", type=str, default="How many airplanes are there in this image?", help="Query/instruction for the model")
-    parser.add_argument("--task", type=str, choices=["auto", "detection", "segmentation", "counting", "vqa", "generation"], 
+    parser.add_argument("--task", type=str, choices=["auto", "detection", "segmentation", "counting", "vqa", "generation", "depth_estimation"], 
                         default="auto", help="Task type (default: auto)")
     parser.add_argument("--output_path", type=str, default="result_visualization.png", help="Path to save the output visualization")
     parser.add_argument("--hybrid_mode", action="store_true", help="Whether to use YOLO for object detection")
@@ -64,6 +64,8 @@ def main():
         result = model.count_objects(image, args.query)
     elif task_type == "generation":
         result = model.generate_image(args.refer_image_path, args.image_prompt)
+    elif task_type == "depth_estimation":
+        result = model.depth_estimation(image, args.query)
     else:    # VQA
         result = model.answer_question(image, args.query)
     
@@ -88,6 +90,10 @@ def main():
     elif task_type == "generation":
         result.save(args.output_path, format="PNG")
         print(f"The generated image is saved as '{args.output_path}'")
+    elif task_type == "depth_estimation":
+        result['bbox_result'].save(args.output_path.replace(".png", "_bbox.png"), format="PNG")
+        result['depth_map'].save(args.output_path.replace(".png", "_full.png"), format="PNG")
+        print(f"The depth map is saved as '{args.output_path.replace(".png", "_bbox.png")}' and '{args.output_path.replace(".png", "_full.png")}'")
     else:  # QA
         print(f"The answer is: {result['answer']}")
     
