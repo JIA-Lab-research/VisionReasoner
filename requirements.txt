@@ -25,3 +25,4 @@ wandb
 sam2
 ultralytics
 openai
+pycolmap

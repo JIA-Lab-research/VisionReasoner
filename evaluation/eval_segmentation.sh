@@ -1,8 +1,9 @@
 #!/bin/bash
 set -e
 
-MODEL_TYPE="vision_reasoner"  # Model type: qwen or vision_reasoner or qwen2
+MODEL_TYPE="vision_reasoner"  # Model type: qwen2vl or vision_reasoner or qwen25vl
 TEST_DATA_PATH=${1:-"Ricky06662/refcocog_test"}
+MODEL_PATH=${2:-"Ricky06662/VisionReasoner-7B"}
 
 # Extract model name and test dataset name for output directory
 TEST_NAME=$(echo $TEST_DATA_PATH | sed -E 's/.*\/([^\/]+)$/\1/')
@@ -24,6 +25,7 @@ for i in $(seq 0 $((NUM_PARTS-1))); do
     (
         python evaluation/evaluation_segmentation.py \
             --model $MODEL_TYPE \
+            --model_path $MODEL_PATH \
             --output_path $OUTPUT_PATH \
             --test_data_path $TEST_DATA_PATH \
             --idx $process_idx \

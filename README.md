@@ -260,6 +260,9 @@ bash evaluation/eval_count.sh Ricky06662/counting_pixmo_test
 bash evaluation/eval_count.sh Ricky06662/counting_countbench
 ```
 
+> [!NOTE]
+> If you want to evaluate in expression level on RefCOCO(g/+) as detailed in [Issue12](https://github.com/dvlab-research/VisionReasoner/issues/12), you can try add '**_all**' to eval data, such as '**Ricky06662/refcoco_val_all**'.
+
 ## Training
 
 We recommend you to [Seg-Zero](https://github.com/dvlab-research/Seg-Zero) for training the VisionReasoner.  

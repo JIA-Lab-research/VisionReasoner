@@ -4,7 +4,7 @@ from PIL import Image
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 from models.vision_reasoner_model import VisionReasonerModel
-from utils import visualize_results_enhanced
+from utils import visualize_results_enhanced, visualize_pose_estimation_results_enhanced, visualize_depth_estimation_results_enhanced
 
 def main():
     parser = argparse.ArgumentParser(description="Test unified vision model on a single image")
@@ -13,7 +13,7 @@ def main():
     parser.add_argument("--segmentation_model_path", type=str, default="facebook/sam2-hiera-large")
     parser.add_argument("--image_path", type=str, default="assets/airplanes.png", help="Path to the input image")
     parser.add_argument("--query", type=str, default="How many airplanes are there in this image?", help="Query/instruction for the model")
-    parser.add_argument("--task", type=str, choices=["auto", "detection", "segmentation", "counting", "vqa", "generation", "depth_estimation"], 
+    parser.add_argument("--task", type=str, choices=["auto", "detection", "segmentation", "counting", "vqa", "generation", "depth_estimation", "pose_estimation"], 
                         default="auto", help="Task type (default: auto)")
     parser.add_argument("--output_path", type=str, default="result_visualization.png", help="Path to save the output visualization")
     parser.add_argument("--hybrid_mode", action="store_true", help="Whether to use YOLO for object detection")
@@ -22,6 +22,8 @@ def main():
     parser.add_argument("--image_prompt", type=str, default="", help="Prompt for image generation")
     parser.add_argument("--generation_mode", action="store_true", help="Whether to use generation model")
     parser.add_argument("--generation_model_name", type=str, default="gpt-image-1", help="Name of the generation model")
+    parser.add_argument("--depth_estimation_model_path", type=str, default=None, help="Path to the depth estimation model")  # facebook/VGGT-1B
+    parser.add_argument("--pose_estimation_model_path", type=str, default=None, help="Path to the pose estimation model")  # usyd-community/vitpose-plus-base
     args = parser.parse_args()
     
     # Determine task type
@@ -42,11 +44,15 @@ def main():
         model = VisionReasonerModel(reasoning_model_path=args.model_path, 
                                 task_router_model_path=args.task_router_model_path, 
                                 segmentation_model_path=args.segmentation_model_path,
-                                yolo_model_path=args.yolo_model_path)
+                                yolo_model_path=args.yolo_model_path,
+                                depth_estimation_model_path=args.depth_estimation_model_path,
+                                pose_estimation_model_path=args.pose_estimation_model_path)
     else:
         model = VisionReasonerModel(reasoning_model_path=args.model_path, 
                                 task_router_model_path=args.task_router_model_path, 
-                                segmentation_model_path=args.segmentation_model_path)
+                                segmentation_model_path=args.segmentation_model_path,
+                                depth_estimation_model_path=args.depth_estimation_model_path,
+                                pose_estimation_model_path=args.pose_estimation_model_path)
 
         
     if task_type != "generation":
@@ -66,6 +72,8 @@ def main():
         result = model.generate_image(args.refer_image_path, args.image_prompt)
     elif task_type == "depth_estimation":
         result = model.depth_estimation(image, args.query)
+    elif task_type == "pose_estimation":
+        result = model.pose_estimation(image, args.query)
     else:    # VQA
         result = model.answer_question(image, args.query)
     
@@ -91,15 +99,25 @@ def main():
         result.save(args.output_path, format="PNG")
         print(f"The generated image is saved as '{args.output_path}'")
     elif task_type == "depth_estimation":
-        result['bbox_result'].save(args.output_path.replace(".png", "_bbox.png"), format="PNG")
-        result['depth_map'].save(args.output_path.replace(".png", "_full.png"), format="PNG")
-        print(f"The depth map is saved as '{args.output_path.replace(".png", "_bbox.png")}' and '{args.output_path.replace(".png", "_full.png")}'")
+        print(f"Total number of depth estimation objects: {len(result['bboxes'])}")
+    elif task_type == "pose_estimation":
+        print(f"Total number of pose estimation objects: {len(result['bboxes'])}")
     else:  # QA
         print(f"The answer is: {result['answer']}")
     
-    if task_type != "generation" and task_type != "vqa" and task_type != "counting":
+    if task_type == "segmentation" or task_type == "detection":
         # Visualize results with the new three-panel layout
         visualize_results_enhanced(image, result, task_type, args.output_path)
+        print(f"\nResult visualization saved as '{args.output_path}'")
+        
+    if task_type == "depth_estimation":
+        # Visualize results with the new three-panel layout
+        visualize_depth_estimation_results_enhanced(image, result, task_type, args.output_path)
+        print(f"\nResult visualization saved as '{args.output_path}'")
+        
+    if task_type == "pose_estimation":
+        # Visualize results with the new three-panel layout
+        visualize_pose_estimation_results_enhanced(image, result, task_type, args.output_path)
         print(f"\nResult visualization saved as '{args.output_path}'")
 
 

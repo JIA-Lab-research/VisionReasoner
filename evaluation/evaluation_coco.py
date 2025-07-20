@@ -64,9 +64,9 @@ def main():
     args = parse_args()
     
     # Initialize model
-    if args.model == "qwen":
+    if args.model == "qwen2vl":
         model = QwenVLModel(model_path=args.model_path)
-    elif args.model == "qwen2":
+    elif args.model == "qwen25vl":
         model = QwenVLModel(model_path=args.model_path)
     elif args.model == "vision_reasoner":
         model = VisionReasonerModel(reasoning_model_path=args.model_path, 

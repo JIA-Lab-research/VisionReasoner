@@ -1,8 +1,9 @@
 #!/bin/bash
 set -e
 
-MODEL_TYPE="vision_reasoner"  # Model type: qwen2vl or vision_reasoner or qwen25vl
-TEST_DATA_PATH=${1:-"Ricky06662/counting_pixmo_test"}
+MODEL_TYPE="qwen25vl"  # Model type: qwen2vl or vision_reasoner or qwen25vl
+TEST_DATA_PATH=${1:-"Ricky06662/ReasonSeg_val"}
+MODEL_PATH=${2:-"Qwen/Qwen2.5-VL-7B-Instruct"}
 
 # Extract model name and test dataset name for output directory
 TEST_NAME=$(echo $TEST_DATA_PATH | sed -E 's/.*\/([^\/]+)$/\1/')
@@ -22,8 +23,9 @@ for i in $(seq 0 $((NUM_PARTS-1))); do
     
     export CUDA_VISIBLE_DEVICES=$gpu_id
     (
-        python evaluation/evaluation_count.py \
+        python evaluation/evaluation_segmentation.py \
             --model $MODEL_TYPE \
+            --model_path $MODEL_PATH \
             --output_path $OUTPUT_PATH \
             --test_data_path $TEST_DATA_PATH \
             --idx $process_idx \
@@ -35,4 +37,4 @@ done
 # Wait for all processes to complete
 wait
 
-python evaluation/calculate_counting.py --output_dir $OUTPUT_PATH
+python evaluation/calculate_iou_with_bbox.py --output_dir $OUTPUT_PATH

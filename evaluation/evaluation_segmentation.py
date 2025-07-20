@@ -16,7 +16,7 @@ from vision_reasoner.models.qwen_vl import QwenVLModel
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default="vision_reasoner")
-    parser.add_argument("--model_path", type=str, default="pretrained_models/VisionReasoner-7B", choices=["Ricky06662/VisionReasoner-7B", "Qwen/Qwen2.5-VL-7B-Instruct", "Qwen/Qwen2-VL-7B-Instruct"])
+    parser.add_argument("--model_path", type=str, default="pretrained_models/VisionReasoner-7B")
     parser.add_argument("--task_router_model_path", type=str, default="pretrained_models/TaskRouter-1.5B")
     parser.add_argument("--segmentation_model_path", type=str, default="facebook/sam2-hiera-large")
     parser.add_argument("--output_path", type=str, required=True)
@@ -62,9 +62,9 @@ def main():
     args = parse_args()
     
     # Initialize model
-    if args.model == "qwen":
+    if args.model == "qwen2vl":
         model = QwenVLModel(model_path=args.model_path)
-    elif args.model == "qwen2":
+    elif args.model == "qwen25vl":
         model = QwenVLModel(model_path=args.model_path)
     elif args.model == "vision_reasoner":
         model = VisionReasonerModel(reasoning_model_path=args.model_path, 

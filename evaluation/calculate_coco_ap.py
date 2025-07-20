@@ -40,7 +40,7 @@ def calculate_metrics(output_dir, gt_json_path):
         for item in results:         
             # Calculate think text length if available
             if 'think' in item and item['think']:
-                think_text_lengths.append(len(item['think']))
+                think_text_lengths.append(len(item['think'].split()))
             
             # Original bbox processing code
             bbox = item['bbox']
@@ -74,9 +74,9 @@ def calculate_metrics(output_dir, gt_json_path):
         max_think_length = max(think_text_lengths)
         print(f"\n-----------------Think Text Statistics----------------------------------")
         print(f"Number of think texts: {len(think_text_lengths)}")
-        print(f"Average think text length: {avg_think_length:.2f} characters")
-        print(f"Minimum think text length: {min_think_length} characters")
-        print(f"Maximum think text length: {max_think_length} characters")
+        print(f"Average think text length: {avg_think_length:.2f} words")
+        print(f"Minimum think text length: {min_think_length} words")
+        print(f"Maximum think text length: {max_think_length} words")
         print(f"------------------------------------------------------------------\n")
     
     coco_gt = COCO(gt_json_path)  # load ground truth
