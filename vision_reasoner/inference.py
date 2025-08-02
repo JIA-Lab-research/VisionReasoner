@@ -4,7 +4,12 @@ from PIL import Image
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 from models.vision_reasoner_model import VisionReasonerModel
-from utils import visualize_results_enhanced, visualize_pose_estimation_results_enhanced, visualize_depth_estimation_results_enhanced
+from utils import (visualize_results_enhanced, 
+                   visualize_pose_estimation_results_enhanced, 
+                   visualize_depth_estimation_results_enhanced,
+                   visualize_results_video,
+                   visualize_pose_estimation_results_video,
+                   visualize_depth_estimation_results_video)
 
 def main():
     parser = argparse.ArgumentParser(description="Test unified vision model on a single image")
@@ -108,16 +113,19 @@ def main():
     if task_type == "segmentation" or task_type == "detection":
         # Visualize results with the new three-panel layout
         visualize_results_enhanced(image, result, task_type, args.output_path)
+        visualize_results_video(image, result, task_type, args.output_path)
         print(f"\nResult visualization saved as '{args.output_path}'")
         
     if task_type == "depth_estimation":
         # Visualize results with the new three-panel layout
         visualize_depth_estimation_results_enhanced(image, result, task_type, args.output_path)
+        visualize_depth_estimation_results_video(image, result, task_type, args.output_path)
         print(f"\nResult visualization saved as '{args.output_path}'")
         
     if task_type == "pose_estimation":
         # Visualize results with the new three-panel layout
         visualize_pose_estimation_results_enhanced(image, result, task_type, args.output_path)
+        visualize_pose_estimation_results_video(image, result, task_type, args.output_path)
         print(f"\nResult visualization saved as '{args.output_path}'")
 
 
