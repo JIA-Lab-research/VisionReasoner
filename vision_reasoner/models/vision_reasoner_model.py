@@ -872,64 +872,91 @@ class VisionReasonerModel(BaseVisionModel, DetectionModel, SegmentationModel, Co
                 # convert depth map to PIL image for resizing
                 depth_map_pil = PILImage.fromarray(depth_map)
                 
-                # calculate padding area and scaling factor
+                # calculate padding area and scaling factor with more precise calculation
                 target_size = max(orig_w, orig_h)
                 pad_w = (target_size - orig_w) // 2
                 pad_h = (target_size - orig_h) // 2
                 
-                # resize depth map and crop padding area
+                # resize depth map and crop padding area with more precise coordinates
                 depth_map_resized = depth_map_pil.resize((target_size, target_size), PILImage.BILINEAR)
+                
+                # ensure crop coordinates are exactly matched with original image size
+                crop_left = pad_w
+                crop_top = pad_h
+                crop_right = target_size - pad_w
+                crop_bottom = target_size - pad_h
+                
+                # ensure crop area is not larger than original image size
+                crop_right = min(crop_right, orig_w)
+                crop_bottom = min(crop_bottom, orig_h)
+                
                 depth_map_cropped = depth_map_resized.crop((
-                    pad_w,                    # left
-                    pad_h,                    # top
-                    target_size - pad_w,      # right
-                    target_size - pad_h       # bottom
+                    crop_left,    # left
+                    crop_top,     # top
+                    crop_right,   # right
+                    crop_bottom   # bottom
                 ))
                 
                 # convert back to numpy array
                 depth_map = np.array(depth_map_cropped)
                 
-                # transform bboxes to the same coordinate system
+                # convert from square image coordinates to target_size coordinates
                 # 1. convert from square image coordinates to target_size coordinates
                 square_size = pil_image.size[0]  # size of square image
                 scale_factor = target_size / square_size
                 
-                # 2. apply scaling and cropping transformation
+                # 2. apply scaling and cropping transformation with more precise calculation
                 transformed_bboxes = []
                 for bbox in bboxes:
                     x1, y1, x2, y2 = bbox
                     # scale to target_size
-                    x1 = int(x1 * scale_factor)
-                    y1 = int(y1 * scale_factor)
-                    x2 = int(x2 * scale_factor)
-                    y2 = int(y2 * scale_factor)
+                    x1_scaled = x1 * scale_factor
+                    y1_scaled = y1 * scale_factor
+                    x2_scaled = x2 * scale_factor
+                    y2_scaled = y2 * scale_factor
                     
-                    # subtract padding offset
-                    x1 = max(0, x1 - pad_w)
-                    y1 = max(0, y1 - pad_h)
-                    x2 = min(orig_w, x2 - pad_w)
-                    y2 = min(orig_h, y2 - pad_h)
+                    # subtract padding offset with more precise calculation
+                    x1_final = max(0, x1_scaled - pad_w)
+                    y1_final = max(0, y1_scaled - pad_h)
+                    x2_final = min(orig_w, x2_scaled - pad_w)
+                    y2_final = min(orig_h, y2_scaled - pad_h)
                     
-                    transformed_bboxes.append([x1, y1, x2, y2])
+                    # ensure bbox coordinates are integers and valid
+                    x1_final = int(round(x1_final))
+                    y1_final = int(round(y1_final))
+                    x2_final = int(round(x2_final))
+                    y2_final = int(round(y2_final))
+                    
+                    # ensure bbox is valid (at least 1x1 pixel)
+                    if x2_final > x1_final and y2_final > y1_final:
+                        transformed_bboxes.append([x1_final, y1_final, x2_final, y2_final])
                 
                 # Create RGB depth map
                 depth_map_rgb = np.stack([depth_map] * 3, axis=-1)
                 
                 # Convert original image to numpy array
-                original_image = np.array(image)
+                original_image_array = np.array(image)
+                
+                # ensure depth map size is consistent with original image
+                if depth_map_rgb.shape[:2] != original_image_array.shape[:2]:
+                    # if size is not consistent, resize depth map
+                    depth_map_pil_final = PILImage.fromarray(depth_map)
+                    depth_map_pil_final = depth_map_pil_final.resize((orig_w, orig_h), PILImage.BILINEAR)
+                    depth_map_rgb = np.stack([np.array(depth_map_pil_final)] * 3, axis=-1)
                 
                 # Create combined images with two types of masks
                 # 1. Using transformed bounding box mask
-                bbox_mask = np.zeros_like(original_image, dtype=bool)
+                bbox_mask = np.zeros_like(original_image_array, dtype=bool)
                 for bbox in transformed_bboxes:
                     x1, y1, x2, y2 = bbox
                     if x2 > x1 and y2 > y1:  # ensure bbox is valid
                         bbox_mask[y1:y2, x1:x2] = True
                 
-                bbox_depth_map = np.where(bbox_mask, depth_map_rgb, original_image)
+                bbox_depth_map = np.where(bbox_mask, depth_map_rgb, original_image_array)
                 
                 return {
                     'bbox_depth_map': bbox_depth_map,  # Result using transformed bounding box mask
+                    'thinking': thinking,
                     # 'depth_map': Image.fromarray(depth_map),      # Original depth map
                     'bboxes': transformed_bboxes,  # Transformed bounding boxes
                 }
@@ -987,6 +1014,7 @@ class VisionReasonerModel(BaseVisionModel, DetectionModel, SegmentationModel, Co
             # pdb.set_trace()
             return {
                 'keypoint_edges': self.pose_estimation_model.config.edges,
+                'thinking': thinking,
                 'pose_results': pose_results,  # Result using transformed bounding box mask
                 'bboxes': bboxes
             }
