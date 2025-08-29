@@ -139,10 +139,14 @@ class VisionReasonerModel(BaseVisionModel, DetectionModel, SegmentationModel, Co
             except Exception as e:
                 print(f"Error parsing JSON: {e}")
         
-        think_pattern = r'<think>([^<]+)</think>'
-        think_match = re.search(think_pattern, output_text)
-        if think_match:
-            think_text = think_match.group(1)
+        # 修改think提取逻辑：提取<answer>标签前面的内容
+        answer_pattern = r'<answer>'
+        answer_match = re.search(answer_pattern, output_text)
+        if answer_match:
+            # 获取<answer>标签前面的所有内容作为think_text
+            think_text = output_text[:answer_match.start()].strip()
+        else:
+            think_text = ""
         
         return pred_bboxes, pred_points, think_text, pred_answer
     
@@ -156,16 +160,10 @@ class VisionReasonerModel(BaseVisionModel, DetectionModel, SegmentationModel, Co
         Returns:
             dict: Result dictionary with answer and thinking (if available)
         """
-        think_pattern = r'<think>([^<]+)</think>'
-        think_match = re.search(think_pattern, output_text)
-        thinking = think_match.group(1) if think_match else ""
-        
-        # Remove thinking tags from output to get cleaner answer
-        clean_answer = re.sub(r'<think>.*?</think>', '', output_text, flags=re.DOTALL).strip()
-        
+       
         return {
-            "answer": clean_answer,
-            "thinking": thinking,
+            "answer": output_text,
+            "thinking": "",
             "full_response": output_text
         }
     

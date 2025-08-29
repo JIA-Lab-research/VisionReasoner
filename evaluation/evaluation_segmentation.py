@@ -7,6 +7,7 @@ from datasets import load_from_disk, load_dataset
 from PIL import Image as PILImage
 from tqdm import tqdm
 import sys
+from visualization import visualize_result
 
 # Add the parent directory to the Python path to import model module
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -107,6 +108,44 @@ def main():
     with open(output_file, "w") as f:
         json.dump(all_outputs, f, indent=2, ensure_ascii=False)
 
+def merge_bboxes(bboxes):
+    """合并所有bboxes，返回最左上和最右下的坐标"""
+    if not bboxes:
+        return None
+    
+    # 初始化最左上和最右下坐标
+    min_x = float('inf')
+    min_y = float('inf')
+    max_x = float('-inf')
+    max_y = float('-inf')
+    
+    for bbox in bboxes:
+        x1, y1, x2, y2 = bbox
+        min_x = min(min_x, x1)
+        min_y = min(min_y, y1)
+        max_x = max(max_x, x2)
+        max_y = max(max_y, y2)
+    
+    return [min_x, min_y, max_x, max_y]
+
+def get_bbox(mask):
+    # Convert mask to numpy array if not already
+    mask = np.array(mask)
+    
+    # Find non-zero points
+    rows = np.any(mask, axis=1)
+    cols = np.any(mask, axis=0)
+    
+    # If mask is all zeros, return empty list
+    if not np.any(mask):
+        return []
+    
+    # Get boundaries
+    y_min, y_max = np.where(rows)[0][[0, -1]]
+    x_min, x_max = np.where(cols)[0][[0, -1]]
+    
+    return [int(x_min), int(y_min), int(x_max), int(y_max)]
+
 def process_batch(model, batch_images, batch_questions, id_list, all_outputs, has_bbox):
     """Process a batch of images and questions"""
     batch_results = model.segment_objects_batch(batch_images, batch_questions)
@@ -118,19 +157,37 @@ def process_batch(model, batch_images, batch_questions, id_list, all_outputs, ha
             mask_all = result["masks"]
             gt_mask = np.array(id_list[i]["mask"])
             
+            # visualize_result(batch_images[i], mask_all, gt_mask, thinking, batch_questions[i])
+            
             intersection, union = compute_iou(mask_all, gt_mask)
             
             bbox_iou = 0.0
-            if has_bbox:
-                try:     
+            
+            try:     
+                if has_bbox:
                     gt_bbox = id_list[i]["bbox"]
+                else:
+                    gt_bbox = get_bbox(gt_mask)
+                
+                if gt_bbox == []:
+                    if len(bboxes) == 0:
+                        bbox_iou = 1.0
+                    else:
+                        bbox_iou = 0.0
+                else:
+                    # adapt to multi-object detection
                     for pred_bbox in bboxes:
                         if compute_bbox_iou(pred_bbox, gt_bbox) > 0.5:
                             bbox_iou = 1.0
                             break
-                except Exception as e:
-                    print(f"Bbox error: {e}, Image ID: {id_list[i]['image_id']}, Ann ID: {id_list[i]['ann_id']}")
-                    bbox_iou = 0.0
+                    merged_bbox = merge_bboxes(bboxes)
+                    if merged_bbox:
+                        if compute_bbox_iou(merged_bbox, gt_bbox) > 0.5:
+                            bbox_iou = 1.0
+                    
+            except Exception as e:
+                print(f"Bbox error: {e}, Image ID: {id_list[i]['image_id']}, Ann ID: {id_list[i]['ann_id']}")
+                bbox_iou = 0.0
             
             all_outputs.append({
                 "image_id": id_list[i]["image_id"],
@@ -138,7 +195,9 @@ def process_batch(model, batch_images, batch_questions, id_list, all_outputs, ha
                 "think": thinking,
                 "intersection": int(intersection),
                 "union": int(union),
-                "bbox_iou": bbox_iou
+                "bbox_iou": bbox_iou,
+                "non_object": int(gt_mask.sum()==0 and len(bboxes)==0),   # for reasonseg where there is no object in the image
+                "non_object_GT": int(gt_mask.sum()==0)
             })
             
         except Exception as e:
@@ -150,7 +209,9 @@ def process_batch(model, batch_images, batch_questions, id_list, all_outputs, ha
                 "think": "",
                 "intersection": 0,
                 "union": np.array(id_list[i]["mask"]).sum(),
-                "bbox_iou": 0.0
+                "bbox_iou": 0.0,
+                "non_object": int(np.array(id_list[i]["mask"]).sum()==0),   # for reasonseg where there is no object in the image
+                "non_object_GT": int(np.array(id_list[i]["mask"]).sum()==0)
             })
         
 
