@@ -1,0 +1,1116 @@
+import torch
+import numpy as np
+import re
+import json
+import os
+from transformers import (
+    Qwen2_5_VLForConditionalGeneration, 
+    AutoProcessor,
+    VitPoseForPoseEstimation,
+    VitPoseImageProcessor
+)
+from sam2.sam2_image_predictor import SAM2ImagePredictor
+from PIL import Image as PILImage
+from ultralytics import YOLOWorld
+from openai import OpenAI
+from io import BytesIO
+from PIL import Image
+import base64
+from .vggt.models.vggt import VGGT
+from .vggt.utils.load_fn import load_and_preprocess_images
+from .base_model import (
+    BaseVisionModel,
+    DetectionModel,
+    SegmentationModel,
+    CountingModel,
+    QAModel
+)
+from qwen_vl_utils import process_vision_info
+from .task_router import TaskRouter
+from mathruler.grader import extract_boxed_content
+
+import pdb
+
+STOP_WORDS = {"is", "are", "find", "the", "segment", "all", "in", "image", 
+              "how", "many", "there", "locate", "please"}
+MAX_QUERY_WORDS = 2
+
+
+class ViSurfModel(BaseVisionModel, DetectionModel, SegmentationModel, CountingModel, QAModel):
+    """
+    VisionReasoner model implementing all task interfaces
+    """
+    def __init__(self, 
+                 reasoning_model_path="Ricky06662/VisionReasoner-7B", 
+                 segmentation_model_path="facebook/sam2-hiera-large",
+                 task_router_model_path="Ricky06662/TaskRouter-1.5B",
+                 yolo_model_path=None,
+                 generation_model_path=None,
+                 depth_estimation_model_path=None,
+                 pose_estimation_model_path=None):
+        """
+        Initialize the VisionReasoner model with reasoning and segmentation components
+        
+        Args:
+            reasoning_model_path (str): Path to the reasoning model
+            segmentation_model_path (str): Path to the segmentation model
+        """
+        self.resize_size = 840
+        
+        # Initialize reasoning model
+        self.reasoning_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            reasoning_model_path,
+            torch_dtype=torch.bfloat16,
+            attn_implementation="flash_attention_2",
+            device_map="auto",
+        )
+        self.reasoning_model.eval()
+        
+        # Initialize processor
+        self.processor = AutoProcessor.from_pretrained(reasoning_model_path, padding_side="left")
+        
+        # Initialize segmentation model
+        self.segmentation_model = SAM2ImagePredictor.from_pretrained(segmentation_model_path)
+
+        # Initialize task router
+        self.task_router = TaskRouter(task_router_model_path)
+        
+        # Initialize depth estimation model
+        self.depth_estimation_model = VGGT.from_pretrained(depth_estimation_model_path).to("cuda") if depth_estimation_model_path is not None else None
+        
+        # Initialize pose estimation model
+        self.pose_estimation_processor = VitPoseImageProcessor.from_pretrained(pose_estimation_model_path) if pose_estimation_model_path is not None else None
+        self.pose_estimation_model = VitPoseForPoseEstimation.from_pretrained(pose_estimation_model_path).to("cuda") if pose_estimation_model_path is not None else None
+        
+        # Template for detection/segmentation tasks
+        self.DETECTION_TEMPLATE = \
+            "Please find \"{Question}\" with bboxs and points." \
+            "Compare the difference between object(s) and find the most closely matched object(s)." \
+            "Output the thinking process in <think> </think> and final answer in <answer> </answer> tags." \
+            "Output the bbox(es) and point(s) inside the interested object(s) in JSON format." \
+            "i.e., <think> thinking process here </think>" \
+            "<answer>{Answer}</answer>"
+        
+        # Template for QA tasks
+        self.QA_TEMPLATE = "{Question}"
+        
+        # Template for math tasks  
+        self.MATH_TEMPLATE = \
+            "{Question} " \
+            "First think about the question and then provide the answer. " \
+            "The answer is in latex format and wrapped using the \\boxed{{}} command. " \
+            "The thinking process and answer are enclosed within <think> </think> and \\boxed{{}} tags, respectively. " \
+            "i.e., <think> thinking process here. </think>\\boxed{{2}}"
+        
+
+        # Initialize YOLO model
+        self.use_hybrid_mode = False
+        if yolo_model_path:
+            self.use_hybrid_mode = True
+            self.yolo_model = YOLOWorld(yolo_model_path)
+        
+        # Initialize generation model
+        if generation_model_path:
+            self.generation_model = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", generation_model_path))
+
+    
+    def extract_bbox_points_think(self, output_text, x_factor, y_factor):
+        """
+        Extract bounding boxes, points, and thinking process from model output
+        
+        Args:
+            output_text (str): Raw output text from the model
+            x_factor (float): Scaling factor for x coordinates
+            y_factor (float): Scaling factor for y coordinates
+            
+        Returns:
+            tuple: (pred_bboxes, pred_points, think_text, pred_answer)
+        """
+        json_match = re.search(r'<answer>\s*(.*?)\s*</answer>', output_text, re.DOTALL)
+        pred_bboxes = []
+        pred_points = []
+        pred_answer = None
+        think_text = ""
+        
+        if json_match:
+            try:
+                data = json.loads(json_match.group(1))
+                pred_answer = data
+                pred_bboxes = [[
+                    int(item['bbox_2d'][0] * x_factor + 0.5),
+                    int(item['bbox_2d'][1] * y_factor + 0.5),
+                    int(item['bbox_2d'][2] * x_factor + 0.5),
+                    int(item['bbox_2d'][3] * y_factor + 0.5)
+                ] for item in data]
+                pred_points = [[
+                    int(item['point_2d'][0] * x_factor + 0.5),
+                    int(item['point_2d'][1] * y_factor + 0.5)
+                ] for item in data]
+            except Exception as e:
+                print(f"Error parsing JSON: {e}")
+        
+        # 修改think提取逻辑：提取<answer>标签前面的内容
+        answer_pattern = r'<answer>'
+        answer_match = re.search(answer_pattern, output_text)
+        if answer_match:
+            # 获取<answer>标签前面的所有内容作为think_text
+            think_text = output_text[:answer_match.start()].strip()
+        else:
+            think_text = ""
+        
+        return pred_bboxes, pred_points, output_text, pred_answer
+    
+    def extract_qa_answer(self, output_text):
+        """
+        Extract answer for QA tasks
+        
+        Args:
+            output_text (str): Raw output text from the model
+            
+        Returns:
+            dict: Result dictionary with answer and thinking (if available)
+        """
+       
+        return {
+            "answer": output_text,
+            "thinking": "",
+            "full_response": output_text
+        }
+    
+    def extract_math_answer(self, output_text):
+        """
+        Extract answer for math tasks
+        """
+        answer_match = re.search(r'\\boxed{(.*?)}', output_text, re.DOTALL)
+        if answer_match:
+            # 获取<answer>标签前面的所有内容作为think_text
+            answer = extract_boxed_content(output_text)
+            think_text = output_text[:answer_match.start()].strip()
+        else:
+            answer = ""
+            think_text = output_text
+        
+        return {
+            "answer": answer,
+            "thinking": output_text,
+            "full_response": output_text
+        }
+    
+    def generate_masks(self, image, bboxes, points=None):
+        """
+        Generate segmentation masks for given image, bounding boxes and points
+        
+        Args:
+            image (PIL.Image): Input image
+            bboxes (list): List of bounding boxes
+            points (list): List of points
+            
+        Returns:
+            numpy.ndarray: Combined segmentation mask
+        """
+        img_height, img_width = image.height, image.width
+        mask_all = np.zeros((img_height, img_width), dtype=bool)
+        
+        if not bboxes:
+            return mask_all
+        
+        if points and len(points) != len(bboxes):
+            return mask_all
+        
+        try:
+            self.segmentation_model.set_image(image)
+            if points:
+                for bbox, point in zip(bboxes, points):
+                    masks, scores, _ = self.segmentation_model.predict(
+                        point_coords=[point],
+                        point_labels=[1],
+                        box=bbox
+                    )
+                    sorted_ind = np.argsort(scores)[::-1]
+                    masks = masks[sorted_ind]
+                    mask = masks[0].astype(bool)
+                    mask_all = np.logical_or(mask_all, mask)
+            else:
+                for bbox in bboxes:
+                    masks, scores, _ = self.segmentation_model.predict(
+                        box=bbox
+                    )
+                    sorted_ind = np.argsort(scores)[::-1]
+                    masks = masks[sorted_ind]
+                
+            return mask_all
+        except Exception as e:
+            print(f"Error generating masks: {e}")
+            return mask_all
+    
+    def _generate_model_output(self, images, instructions, template, batch_mode=False, resize_image=True):
+        """
+        Generate raw model output for images and instructions
+        
+        Args:
+            images (PIL.Image or List[PIL.Image]): Input image(s)
+            instructions (str or List[str]): Text instruction(s)/query(ies)
+            template (str): Template to use for the prompt
+            batch_mode (bool): Whether to process in batch mode
+            
+        Returns:
+            tuple: (output_texts, scale_factors)
+        """
+        if not batch_mode:
+            images = [images]
+            instructions = [instructions]
+        
+        batch_messages = []
+        scale_factors = []
+        
+        for image, instruction in zip(images, instructions):
+            # Prepare image
+            if resize_image:
+                original_width, original_height = image.size
+                x_factor, y_factor = original_width/self.resize_size, original_height/self.resize_size
+                scale_factors.append((x_factor, y_factor))
+                resized_image = image.resize((self.resize_size, self.resize_size), PILImage.BILINEAR)
+            else:
+                resized_image = image
+                scale_factors.append((1.0, 1.0))
+            
+            # Format text based on template
+            if "{Question}" in template:
+                formatted_text = template.format(
+                    Question=instruction.lower().strip("\"!"),
+                    Answer="[{\"bbox_2d\": [10, 100, 200, 210], \"point_2d\": [30, 110]}, {\"bbox_2d\": [225, 296, 706, 786], \"point_2d\": [302, 410]}]"
+                )
+            else:
+                formatted_text = template
+                
+            # Create message
+            message = [{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image", 
+                        "image": resized_image
+                    },
+                    {   
+                        "type": "text",
+                        "text": formatted_text
+                    }
+                ]
+            }]
+            batch_messages.append(message)
+        
+        # Prepare for batch inference
+        texts = [self.processor.apply_chat_template(msg, tokenize=False, add_generation_prompt=True) for msg in batch_messages]
+        
+        image_inputs, video_inputs = process_vision_info(batch_messages)
+        
+        inputs = self.processor(
+            text=texts,
+            images=image_inputs,
+            padding=True,
+            return_tensors="pt",
+        )
+        inputs = inputs.to("cuda")
+        
+        # Generate output
+        generated_ids = self.reasoning_model.generate(**inputs, use_cache=True, max_new_tokens=2048, do_sample=False)
+        
+        generated_ids_trimmed = [
+            out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+        ]
+        
+        output_texts = self.processor.batch_decode(
+            generated_ids_trimmed, 
+            skip_special_tokens=True, 
+            clean_up_tokenization_spaces=False
+        )
+        if not batch_mode:
+            return output_texts[0], scale_factors[0]
+        return output_texts, scale_factors
+    
+    def route_task(self, instruction):
+        """
+        Route task based on instruction
+        """
+        task_type = self.task_router.route_task(instruction)
+        return task_type
+    
+    # BaseVisionModel implementation
+    def process_single_image(self, image, instruction, return_task_type=False):
+        """
+        Process a single image with given instruction
+        
+        Args:
+            image (PIL.Image): Input image
+            instruction (str): Text instruction or query
+            
+        Returns:
+            dict: Results dictionary
+        """
+        # Determine task type based on instruction
+        task_type = self.route_task(instruction)
+        
+        if task_type == "segmentation":
+            result = self.segment_objects(image, instruction)
+        elif task_type == "detection":
+            result = self.detect_objects(image, instruction)
+        elif task_type == "counting":
+            result = self.count_objects(image, instruction)
+        elif task_type == "depth_estimation":
+            result = self.depth_estimation(image, instruction)
+        elif task_type == "generation":
+            result = self.generate_image(image, instruction)
+        else:  # Default to VQA
+            result = self.answer_question(image, instruction)
+        
+        if return_task_type:
+            return result, task_type
+        else:
+            return result
+    
+    def process_batch(self, batch_images, batch_instructions):
+        """
+        Process a batch of images with given instructions
+        
+        Args:
+            batch_images (list): List of PIL Images
+            batch_instructions (list): List of text instructions or queries
+            
+        Returns:
+            list: List of result dictionaries
+        """
+        results = []
+        for image, instruction in zip(batch_images, batch_instructions):
+            result = self.process_single_image(image, instruction)
+            results.append(result)
+        return results
+    
+    def detect_objects_yolo(self, image, query):
+        """
+        Detect objects in an image based on a query using YOLO model
+        
+        Args:
+            image: Input image
+            query: Text query describing what to detect
+            
+        Returns:
+            dict: Results with bounding boxes and scores
+        """
+        # Initialize a YOLO model
+        query = " ".join([word.strip(".\"?!'") for word in query.lower().strip(".\"?!").split() if word not in STOP_WORDS])
+        names = [query]
+        self.yolo_model.set_classes(names)
+
+        # Run detection on the given image
+        results = self.yolo_model.predict(image)
+        
+        # Get original image dimensions
+        img_height, img_width = image.height, image.width
+        
+        # Get YOLO's input size
+        yolo_input_size = results[0].orig_shape
+        
+        # Calculate scaling factors
+        x_scale = img_width / yolo_input_size[1]
+        y_scale = img_height / yolo_input_size[0]
+        
+        # Scale the bounding boxes back to original image size
+        bboxes = results[0].boxes.xyxy
+        scaled_bboxes = []
+        for bbox in bboxes:
+            scaled_bbox = [
+                int(bbox[0] * x_scale),
+                int(bbox[1] * y_scale),
+                int(bbox[2] * x_scale),
+                int(bbox[3] * y_scale)
+            ]
+            scaled_bboxes.append(scaled_bbox)
+
+        return scaled_bboxes
+
+    def if_yolo_condition(self, query):
+        """
+        Check if YOLO should be used for the given query
+        
+        Args:
+            query (str): Text query describing what to detect
+            
+        Returns:
+            bool: True if YOLO should be used, False otherwise
+        """
+
+        # trivial condition
+        query_words = [word for word in query.lower().strip(".\"?!").split() if word not in STOP_WORDS]
+        return len(query_words) <= MAX_QUERY_WORDS
+    
+    # DetectionModel implementation
+    def detect_objects(self, image, query):
+        """
+        Detect objects in an image based on a query
+        
+        Args:
+            image: Input image
+            query: Text query describing what to detect
+            
+        Returns:
+            dict: Results with bounding boxes and scores
+        """
+        try:
+            if self.use_hybrid_mode and self.if_yolo_condition(query):
+                bboxes = self.detect_objects_yolo(image, query)
+                scores = [1.0] * len(bboxes)
+                # use middle point of bbox as point
+                points = [[int((bbox[0] + bbox[2]) / 2), int((bbox[1] + bbox[3]) / 2)] for bbox in bboxes]
+                output_text, thinking, pred_answer = "", "", str(bboxes)
+            else:
+                output_text, (x_factor, y_factor) = self._generate_model_output(
+                    image,
+                    query,
+                    self.DETECTION_TEMPLATE
+                )
+                
+                bboxes, points, thinking, pred_answer = self.extract_bbox_points_think(
+                    output_text, 
+                    x_factor, 
+                    y_factor
+                )
+                
+                # Assign confidence scores (all 1.0 as the model doesn't provide them)
+                scores = [1.0] * len(bboxes)
+            
+            return {
+                "bboxes": bboxes,
+                "points": points,
+                "scores": scores,
+                "thinking": thinking,
+                "full_response": output_text,
+                "pred_answer": pred_answer
+            }
+        except Exception as e:
+            print(f"Error in detection: {e}")
+            return {
+                "bboxes": [],
+                "points": [],
+                "scores": [],
+                "thinking": "",
+                "full_response": "",
+                "pred_answer": None
+            }
+    
+    def detect_objects_batch(self, images, queries):
+        """
+        Detect objects in a batch of images
+        
+        Args:
+            images: List of input images
+            queries: List of text queries
+            
+        Returns:
+            list: List of detection results
+        """
+        try:
+            # TODO: support yolo for batch
+
+            output_texts, scale_factors = self._generate_model_output(
+                images,
+                queries,
+                self.DETECTION_TEMPLATE,
+                batch_mode=True
+            )
+            
+            results = []
+            for output_text, (x_factor, y_factor) in zip(output_texts, scale_factors):
+                bboxes, points, thinking, pred_answer = self.extract_bbox_points_think(
+                    output_text, 
+                    x_factor, 
+                    y_factor
+                )
+                
+                scores = [1.0] * len(bboxes)
+                results.append({
+                    "bboxes": bboxes,
+                    "points": points,
+                    "scores": scores,
+                    "thinking": thinking,
+                    "full_response": output_text,
+                    "pred_answer": pred_answer
+                })
+            return results
+        except Exception as e:
+            print(f"Error in batch detection: {e}")
+            return [{
+                "bboxes": [],
+                "points": [],
+                "scores": [],
+                "thinking": "",
+                "full_response": "",
+                "pred_answer": None
+            } for _ in range(len(images))]
+    
+    # SegmentationModel implementation
+    def segment_objects(self, image, query):
+        """
+        Segment objects in an image based on a query
+        
+        Args:
+            image: Input image
+            query: Text query describing what to segment
+            
+        Returns:
+            dict: Results with masks and bounding boxes
+        """
+        try:
+            if self.use_hybrid_mode and self.if_yolo_condition(query):
+                bboxes = self.detect_objects_yolo(image, query)
+                # use middle point of bbox as point
+                points = [[int((bbox[0] + bbox[2]) / 2), int((bbox[1] + bbox[3]) / 2)] for bbox in bboxes]
+                output_text, thinking, pred_answer = "", "", str(bboxes)
+            else:
+                output_text, (x_factor, y_factor) = self._generate_model_output(
+                    image,
+                    query,
+                    self.DETECTION_TEMPLATE
+                )
+                bboxes, points, thinking, pred_answer = self.extract_bbox_points_think(
+                    output_text, 
+                    x_factor, 
+                    y_factor
+                )
+            masks = self.generate_masks(image, bboxes, points)
+            
+            return {
+                "masks": masks,
+                "bboxes": bboxes,
+                "points": points,
+                "thinking": thinking,
+                "full_response": output_text,
+                "pred_answer": pred_answer
+            }
+        except Exception as e:
+            raise
+            print(f"Error in segmentation: {e}")
+            img_height, img_width = image.height, image.width
+            return {
+                "masks": np.zeros((img_height, img_width), dtype=bool),
+                "bboxes": [],
+                "points": [],
+                "thinking": "",
+                "full_response": "",
+                "pred_answer": None
+            }
+    
+    def segment_objects_batch(self, images, queries):
+        """
+        Segment objects in a batch of images
+        
+        Args:
+            images: List of input images
+            queries: List of text queries
+            
+        Returns:
+            list: List of segmentation results
+        """
+        try:
+            # TODO: support yolo for batch
+            output_texts, scale_factors = self._generate_model_output(
+                images,
+                queries,
+                self.DETECTION_TEMPLATE,
+                batch_mode=True
+            )
+            
+            results = []
+            for image, output_text, (x_factor, y_factor) in zip(images, output_texts, scale_factors):
+                bboxes, points, thinking, pred_answer = self.extract_bbox_points_think(
+                    output_text, 
+                    x_factor, 
+                    y_factor
+                )
+                
+                masks = self.generate_masks(image, bboxes, points)
+                results.append({
+                    "masks": masks,
+                    "bboxes": bboxes,
+                    "points": points,
+                    "thinking": thinking,
+                    "full_response": output_text,
+                    "pred_answer": pred_answer
+                })
+            return results
+        except Exception as e:
+            print(f"Error in batch segmentation: {e}")
+            return [{
+                "masks": np.zeros((img.height, img.width), dtype=bool),
+                "bboxes": [],
+                "points": [],
+                "thinking": "",
+                "full_response": "",
+                "pred_answer": None
+            } for img in images]
+    
+    # CountingModel implementation
+    def count_objects(self, image, query):
+        """
+        Count objects in an image based on a query
+        
+        Args:
+            image: Input image
+            query: Text query describing what to count
+            
+        Returns:
+            dict: Results with count and bounding boxes
+        """
+        try:
+            if self.use_hybrid_mode and self.if_yolo_condition(query):
+                bboxes = self.detect_objects_yolo(image, query)
+                # use middle point of bbox as point
+                points = [[int((bbox[0] + bbox[2]) / 2), int((bbox[1] + bbox[3]) / 2)] for bbox in bboxes]
+                output_text, thinking, pred_answer = "", "", str(bboxes)
+            else:
+                output_text, (x_factor, y_factor) = self._generate_model_output(
+                    image,
+                    query,
+                    self.DETECTION_TEMPLATE
+                )
+                
+                bboxes, points, thinking, pred_answer = self.extract_bbox_points_think(
+                    output_text, 
+                    x_factor, 
+                    y_factor
+                )
+            
+            count = len(bboxes)
+            
+            return {
+                "count": count,
+                "bboxes": bboxes,
+                "points": points,
+                "thinking": thinking,
+                "full_response": output_text,
+                "pred_answer": pred_answer
+            }
+        except Exception as e:
+            print(f"Error in counting: {e}")
+            return {
+                "count": 0,
+                "bboxes": [],
+                "points": [],
+                "thinking": "",
+                "full_response": "",
+                "pred_answer": None
+            }
+    
+    def count_objects_batch(self, images, queries):
+        """
+        Count objects in a batch of images
+        
+        Args:
+            images: List of input images
+            queries: List of text queries
+            
+        Returns:
+            list: List of counting results
+        """
+        try:
+            # TODO: support yolo for batch
+            output_texts, scale_factors = self._generate_model_output(
+                images,
+                queries,
+                self.DETECTION_TEMPLATE,
+                batch_mode=True
+            )
+            
+            results = []
+            for output_text, (x_factor, y_factor) in zip(output_texts, scale_factors):
+                bboxes, points, thinking, pred_answer = self.extract_bbox_points_think(
+                    output_text, 
+                    x_factor, 
+                    y_factor
+                )
+                
+                count = len(bboxes)
+                results.append({
+                    "count": count,
+                    "bboxes": bboxes,
+                    "points": points,
+                    "thinking": thinking,
+                    "full_response": output_text,
+                    "pred_answer": pred_answer
+                })
+            return results
+        except Exception as e:
+            print(f"Error in batch counting: {e}")
+            return [{
+                "count": 0,
+                "bboxes": [],
+                "points": [],
+                "thinking": "",
+                "full_response": "",
+                "pred_answer": None
+            } for _ in range(len(images))]
+    
+    # QAModel implementation
+    def answer_question(self, image, question):
+        """
+        Answer a question about an image
+        
+        Args:
+            image: Input image
+            question: Text question
+            
+        Returns:
+            dict: Results with answer and thinking (if available)
+        """
+        try:
+            output_text, _ = self._generate_model_output(
+                image,
+                question,
+                self.QA_TEMPLATE
+            )
+            
+            result = self.extract_qa_answer(output_text)
+            return result
+        except Exception as e:
+            print(f"Error in QA: {e}")
+            return {
+                "answer": "",
+                "thinking": "",
+                "full_response": ""
+            }
+    
+    def answer_questions_batch(self, images, questions):
+        """
+        Answer questions about a batch of images
+        
+        Args:
+            images: List of input images
+            questions: List of text questions
+            
+        Returns:
+            list: List of QA results
+        """
+        try:
+            output_texts, _ = self._generate_model_output(
+                images,
+                questions,
+                self.QA_TEMPLATE,
+                batch_mode=True
+            )
+            
+            results = []
+            for output_text in output_texts:
+                result = self.extract_qa_answer(output_text)
+                results.append(result)
+            return results
+        except Exception as e:
+            print(f"Error in batch QA: {e}")
+            return [{
+                "answer": "",
+                "thinking": "",
+                "full_response": ""
+            } for _ in range(len(images))]
+               
+    # QAModel implementation
+    def answer_question_math(self, image, question):
+        """
+        Answer a question about an image
+        
+        Args:
+            image: Input image
+            question: Text question
+            
+        Returns:
+            dict: Results with answer and thinking (if available)
+        """
+        try:
+            output_text, _ = self._generate_model_output(
+                image,
+                question,
+                self.MATH_TEMPLATE
+            )
+            
+            result = self.extract_math_answer(output_text)
+            return result
+        except Exception as e:
+            print(f"Error in QA: {e}")
+            return {
+                "answer": "",
+                "thinking": "",
+                "full_response": ""
+            }
+    
+    def answer_questions_batch_math(self, images, questions):
+        """
+        Answer questions about a batch of images
+        
+        Args:
+            images: List of input images
+            questions: List of text questions
+            
+        Returns:
+            list: List of QA results
+        """
+        try:
+            output_texts, _ = self._generate_model_output(
+                images,
+                questions,
+                self.MATH_TEMPLATE,
+                batch_mode=True,
+                resize_image=False
+            )
+            
+            results = []
+            for output_text in output_texts:
+                result = self.extract_math_answer(output_text)
+                results.append(result)
+            return results
+        except Exception as e:
+            print(f"Error in batch QA: {e}")
+            return [{
+                "answer": "",
+                "thinking": "",
+                "full_response": ""
+            } for _ in range(len(images))]
+                     
+    def generate_image(self, refer_image_path, image_prompt):
+        """
+        Generate an image based on a query
+        
+        Args:
+            refer_image_path: Path to the reference image
+            image_prompt: Text prompt describing what to generate
+            
+        Returns:
+            dict: Results with generated image and thinking (if available)
+        """
+        if self.generation_model is None or image_prompt is None:
+            raise ValueError("Do not have generation model or query")
+        
+        try:
+            if refer_image_path == "":
+                # Generate the image
+                output = self.generation_model.images.generate(
+                    model="gpt-image-1",
+                    prompt=image_prompt,
+                )
+                image_base64 = output.data[0].b64_json
+                
+            else:
+                output = self.generation_model.images.edit(
+                    model="gpt-image-1",
+                    image=[open(refer_image_path, "rb")], 
+                    prompt=image_prompt,
+                )
+                image_base64 = output.data[0].b64_json
+            
+            image = PILImage.open(BytesIO(base64.b64decode(image_base64)))
+            return image
+        except Exception as e:
+            print(f"Error in image generation: {e}")
+            return None
+        
+    def depth_estimation(self, image, query):
+        try:
+            if self.depth_estimation_model is None:
+                raise ValueError("Do not initialize depth estimation model")
+            
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            images = load_and_preprocess_images([image], mode="pad").to(device)
+            # print(images[0].shape)
+
+            pil_image = images[0].cpu().numpy()
+            pil_image = np.transpose(pil_image, (1, 2, 0))  # convert (C,H,W) to (H,W,C)
+            pil_image = ((pil_image - pil_image.min()) / (pil_image.max() - pil_image.min()) * 255).astype(np.uint8)
+            pil_image = PILImage.fromarray(pil_image)
+
+            if self.use_hybrid_mode and self.if_yolo_condition(query):
+                bboxes = self.detect_objects_yolo(pil_image, query)
+                # use middle point of bbox as point
+                points = [[int((bbox[0] + bbox[2]) / 2), int((bbox[1] + bbox[3]) / 2)] for bbox in bboxes]
+                output_text, thinking, pred_answer = "", "", str(bboxes)
+            else:
+                # print(pil_image.size)
+                output_text, (x_factor, y_factor) = self._generate_model_output(
+                    pil_image,
+                    query,
+                    self.DETECTION_TEMPLATE
+                )
+                bboxes, points, thinking, pred_answer = self.extract_bbox_points_think(
+                    output_text, 
+                    x_factor, 
+                    y_factor
+                )
+            
+        
+            # bfloat16 is supported on Ampere GPUs (Compute Capability 8.0+) 
+            dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+
+            # Load and preprocess example images
+            with torch.no_grad():
+                with torch.cuda.amp.autocast(dtype=dtype):
+                    images = images[None]  # add batch dimension
+                    aggregated_tokens_list, ps_idx = self.depth_estimation_model.aggregator(images)
+
+                # Predict Depth Maps
+                depth_map, _ = self.depth_estimation_model.depth_head(aggregated_tokens_list, images, ps_idx)
+                
+                # Convert depth map to numpy array and normalize to 0-255 range
+                depth_map = depth_map.squeeze().cpu().numpy()
+                depth_map = ((depth_map - depth_map.min()) / (depth_map.max() - depth_map.min()) * 255).astype(np.uint8)
+                
+                # get original image size
+                original_image = image
+                orig_w, orig_h = original_image.size
+                
+                # convert depth map to PIL image for resizing
+                depth_map_pil = PILImage.fromarray(depth_map)
+                
+                # calculate padding area and scaling factor with more precise calculation
+                target_size = max(orig_w, orig_h)
+                pad_w = (target_size - orig_w) // 2
+                pad_h = (target_size - orig_h) // 2
+                
+                # resize depth map and crop padding area with more precise coordinates
+                depth_map_resized = depth_map_pil.resize((target_size, target_size), PILImage.BILINEAR)
+                
+                # ensure crop coordinates are exactly matched with original image size
+                crop_left = pad_w
+                crop_top = pad_h
+                crop_right = target_size - pad_w
+                crop_bottom = target_size - pad_h
+                
+                # ensure crop area is not larger than original image size
+                crop_right = min(crop_right, orig_w)
+                crop_bottom = min(crop_bottom, orig_h)
+                
+                depth_map_cropped = depth_map_resized.crop((
+                    crop_left,    # left
+                    crop_top,     # top
+                    crop_right,   # right
+                    crop_bottom   # bottom
+                ))
+                
+                # convert back to numpy array
+                depth_map = np.array(depth_map_cropped)
+                
+                # convert from square image coordinates to target_size coordinates
+                # 1. convert from square image coordinates to target_size coordinates
+                square_size = pil_image.size[0]  # size of square image
+                scale_factor = target_size / square_size
+                
+                # 2. apply scaling and cropping transformation with more precise calculation
+                transformed_bboxes = []
+                for bbox in bboxes:
+                    x1, y1, x2, y2 = bbox
+                    # scale to target_size
+                    x1_scaled = x1 * scale_factor
+                    y1_scaled = y1 * scale_factor
+                    x2_scaled = x2 * scale_factor
+                    y2_scaled = y2 * scale_factor
+                    
+                    # subtract padding offset with more precise calculation
+                    x1_final = max(0, x1_scaled - pad_w)
+                    y1_final = max(0, y1_scaled - pad_h)
+                    x2_final = min(orig_w, x2_scaled - pad_w)
+                    y2_final = min(orig_h, y2_scaled - pad_h)
+                    
+                    # ensure bbox coordinates are integers and valid
+                    x1_final = int(round(x1_final))
+                    y1_final = int(round(y1_final))
+                    x2_final = int(round(x2_final))
+                    y2_final = int(round(y2_final))
+                    
+                    # ensure bbox is valid (at least 1x1 pixel)
+                    if x2_final > x1_final and y2_final > y1_final:
+                        transformed_bboxes.append([x1_final, y1_final, x2_final, y2_final])
+                
+                # Create RGB depth map
+                depth_map_rgb = np.stack([depth_map] * 3, axis=-1)
+                
+                # Convert original image to numpy array
+                original_image_array = np.array(image)
+                
+                # ensure depth map size is consistent with original image
+                if depth_map_rgb.shape[:2] != original_image_array.shape[:2]:
+                    # if size is not consistent, resize depth map
+                    depth_map_pil_final = PILImage.fromarray(depth_map)
+                    depth_map_pil_final = depth_map_pil_final.resize((orig_w, orig_h), PILImage.BILINEAR)
+                    depth_map_rgb = np.stack([np.array(depth_map_pil_final)] * 3, axis=-1)
+                
+                # Create combined images with two types of masks
+                # 1. Using transformed bounding box mask
+                bbox_mask = np.zeros_like(original_image_array, dtype=bool)
+                for bbox in transformed_bboxes:
+                    x1, y1, x2, y2 = bbox
+                    if x2 > x1 and y2 > y1:  # ensure bbox is valid
+                        bbox_mask[y1:y2, x1:x2] = True
+                
+                bbox_depth_map = np.where(bbox_mask, depth_map_rgb, original_image_array)
+                
+                return {
+                    'bbox_depth_map': bbox_depth_map,  # Result using transformed bounding box mask
+                    'thinking': thinking,
+                    # 'depth_map': Image.fromarray(depth_map),      # Original depth map
+                    'bboxes': transformed_bboxes,  # Transformed bounding boxes
+                }
+                
+        except Exception as e:
+            raise
+            
+    # PoseEstimationModel implementation
+    def pose_estimation(self, image, query):
+        """
+        Pose estimation in an image based on a query
+        
+        Args:
+            image: Input image
+            query: Text query describing what to pose estimate
+            
+        Returns:
+            dict: Results with pose estimation
+        """
+        try:
+            if self.use_hybrid_mode and self.if_yolo_condition(query):
+                bboxes = self.detect_objects_yolo(image, query)
+                # use middle point of bbox as point
+                points = [[int((bbox[0] + bbox[2]) / 2), int((bbox[1] + bbox[3]) / 2)] for bbox in bboxes]
+                output_text, thinking, pred_answer = "", "", str(bboxes)
+            else:
+                output_text, (x_factor, y_factor) = self._generate_model_output(
+                    image,
+                    query,
+                    self.DETECTION_TEMPLATE
+                )
+                bboxes, points, thinking, pred_answer = self.extract_bbox_points_think(
+                    output_text, 
+                    x_factor, 
+                    y_factor
+                )
+            
+            
+            # bboxes = bboxes
+            pose_input_bboxes = np.array(bboxes)
+            # Convert boxes from VOC (x1, y1, x2, y2) to COCO (x1, y1, w, h) format
+            pose_input_bboxes[:, 2] = pose_input_bboxes[:, 2] - pose_input_bboxes[:, 0]
+            pose_input_bboxes[:, 3] = pose_input_bboxes[:, 3] - pose_input_bboxes[:, 1]
+            
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            pose_estimation_inputs = self.pose_estimation_processor(image, boxes=[pose_input_bboxes], return_tensors="pt").to(device)
+
+            # This is MOE architecture, we should specify dataset indexes for each image in range 0..5
+            pose_estimation_inputs["dataset_index"] = torch.tensor([0], device=device)
+            with torch.no_grad():
+                pose_estimation_outputs = self.pose_estimation_model(**pose_estimation_inputs)
+                # pdb.set_trace()
+                pose_results = self.pose_estimation_processor.post_process_pose_estimation(pose_estimation_outputs, boxes=[pose_input_bboxes], threshold=0.3)
+                pose_results = pose_results[0] # this is default a batch of 1
+            # pdb.set_trace()
+            return {
+                'keypoint_edges': self.pose_estimation_model.config.edges,
+                'thinking': thinking,
+                'pose_results': pose_results,  # Result using transformed bounding box mask
+                'bboxes': bboxes
+            }
+            
+        except Exception as e:
+            raise
