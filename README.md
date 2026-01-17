@@ -5,7 +5,7 @@
 Paper: [📖 VisionReasoner](https://arxiv.org/pdf/2505.12081) [📖 Seg-Zero](https://arxiv.org/pdf/2503.06520)         
 HuggingFace Daily: [🤗 VisionReasoner](https://huggingface.co/papers/2505.12081)  
 Model: [🤗 VisionReasoner-7B](https://huggingface.co/Ricky06662/VisionReasoner-7B) [🤗 TaskRouter-1.5B](https://huggingface.co/Ricky06662/TaskRouter-1.5B)  
-Relative Link: [Seg-Zero![[code]](https://img.shields.io/github/stars/dvlab-research/Seg-Zero)](https://github.com/dvlab-research/Seg-Zero)   
+Relative Link: [Seg-Zero![[code]](https://img.shields.io/github/stars/JIA-Lab-research/Seg-Zero)](https://github.com/JIA-Lab-research/Seg-Zero)   
 
 Overview of VisionReasoner:
 
@@ -15,7 +15,7 @@ Overview of VisionReasoner:
 
 VisionReasoner demonstrates following features:
 1. **VisionReasoner** is a unified framework for visual perception tasks. Through carefully crafted rewards and training strategy, VisionReasoner has strong multi-task capability, addressing diverse visual perception tasks within a shared model.  
-2. We select several representative tasks to evaluate models unified visual ability, including detection tasks (e.g., [COCO](https://cocodataset.org/#home), [RefCOCOg](https://github.com/lichengunc/refer)), segmentation tasks (e.g., [ReasonSeg](https://github.com/dvlab-research/LISA)), counting tasks (e.g., [CountBench](https://teaching-clip-to-count.github.io/)) and VQA tasks (e.g. [DocVQA](https://www.docvqa.org/)).   
+2. We select several representative tasks to evaluate models unified visual ability, including detection tasks (e.g., [COCO](https://cocodataset.org/#home), [RefCOCOg](https://github.com/lichengunc/refer)), segmentation tasks (e.g., [ReasonSeg](https://github.com/JIA-Lab-research/LISA)), counting tasks (e.g., [CountBench](https://teaching-clip-to-count.github.io/)) and VQA tasks (e.g. [DocVQA](https://www.docvqa.org/)).   
 3. Experimental results show that VisionReasoner achieves superior performance across ten diverse visual perception tasks within a single unified framework, outperforming baseline models by a significant margin.   
 4. We have reformulated dozens of visual task types categoried in [Papers With Code](https://paperswithcode.com/datasets?mod=images&page=1). Please refer to [task categorization](task_categorization.md) for details. These task types are categoried as four fundamental task types: detection, segmentation, counting and VQA. More supported task types and more fundamental task types can be added in this framework, such as 3D or medical image processing.  
 
@@ -23,7 +23,7 @@ VisionReasoner demonstrates following features:
 ## News
 
 [May 17th, 2025] 🔥 [📖 Paper](https://arxiv.org/pdf/2505.12081) is coming!   
-[May 17th, 2025] 🔥 VisionReasoner is coming! VisionReasoner is based on our previous [Seg-Zero](https://github.com/dvlab-research/Seg-Zero).  
+[May 17th, 2025] 🔥 VisionReasoner is coming! VisionReasoner is based on our previous [Seg-Zero](https://github.com/JIA-Lab-research/Seg-Zero).  
 
 
 ## Contents
@@ -57,10 +57,10 @@ Besides, we also train a task router that convert diverse vision tasks into give
 
 ## Installation
 > [!NOTE]
-> If you train VisionReasoner using codes in [Seg-Zero](https://github.com/dvlab-research/Seg-Zero), you can directly use the environment of the training codes.  
+> If you train VisionReasoner using codes in [Seg-Zero](https://github.com/JIA-Lab-research/Seg-Zero), you can directly use the environment of the training codes.  
 
 ```bash
-git clone https://github.com/dvlab-research/VisionReasoner.git
+git clone https://github.com/JIA-Lab-research/VisionReasoner.git
 cd VisionReasoner
 conda create -n visionreasoner_test python=3.12
 conda activate visionreasoner_test
@@ -261,7 +261,7 @@ bash evaluation/eval_count.sh Ricky06662/counting_countbench
 ```
 
 > [!NOTE]
-> If you want to evaluate in expression level on RefCOCO(g/+) as detailed in [Issue12](https://github.com/dvlab-research/VisionReasoner/issues/12), you can try add '**_all**' to eval data, such as '**Ricky06662/refcoco_val_all**'.
+> If you want to evaluate in expression level on RefCOCO(g/+) as detailed in [Issue12](https://github.com/JIA-Lab-research/VisionReasoner/issues/12), you can try add '**_all**' to eval data, such as '**Ricky06662/refcoco_val_all**'.
 
 ### Evaluation on ViSurf
 
@@ -274,7 +274,7 @@ bash evaluation/eval_segmentation_with_nonobj.sh
 
 ## Training
 
-We recommend you to [Seg-Zero](https://github.com/dvlab-research/Seg-Zero) for training the VisionReasoner.  
+We recommend you to [Seg-Zero](https://github.com/JIA-Lab-research/Seg-Zero) for training the VisionReasoner.  
 
 
 ## Citation
@@ -298,10 +298,10 @@ We recommend you to [Seg-Zero](https://github.com/dvlab-research/Seg-Zero) for t
 ## Acknowledgement
 We would like to thank the following repos for their great work: 
 
-- This work is built upon the [Seg-Zero](https://github.com/dvlab-research/Seg-Zero), [EasyR1](https://github.com/hiyouga/EasyR1) and [veRL](https://github.com/volcengine/verl).
+- This work is built upon the [Seg-Zero](https://github.com/JIA-Lab-research/Seg-Zero), [EasyR1](https://github.com/hiyouga/EasyR1) and [veRL](https://github.com/volcengine/verl).
 - This work utilizes models from  [Qwen2-VL](https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct), [Qwen2.5-VL](https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct), [SAM2](https://huggingface.co/facebook/sam2-hiera-large) and [YOLO-World](https://github.com/AILab-CVC/YOLO-World). 
 
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=dvlab-research/VisionReasoner&type=Date)](https://star-history.com/#dvlab-research/VisionReasoner&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=JIA-Lab-research/VisionReasoner&type=Date)](https://star-history.com/#JIA-Lab-research/VisionReasoner&Date)
